@@ -1,0 +1,22 @@
+{
+  "name": "agenda-bot",
+  "version": "1.0.0",
+  "description": "Bot de Telegram que gestiona tu agenda personal y te avisa del tiempo/distancia hasta cada cita.",
+  "private": true,
+  "type": "commonjs",
+  "main": "src/bot.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node src/bot.js",
+    "dev": "node --watch src/bot.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.9.1",
+    "chrono-node": "^2.7.7",
+    "dotenv": "^16.4.5",
+    "node-cron": "^3.0.3",
+    "telegraf": "^4.16.3"
+  }
+}
