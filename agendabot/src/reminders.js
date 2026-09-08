@@ -16,23 +16,27 @@ function startReminderLoop(bot) {
 }
 
 async function checkReminders(bot) {
-  const now = Date.now();
-  const events = db.getFutureEventsNeedingReminders();
+  const now = new Date();
+  const events = await db.getEventsWithFutureOccurrences();
 
   for (const ev of events) {
-    const eventTime = new Date(ev.event_time).getTime();
-    const msUntil = eventTime - now;
+    const occurrence = db.nextOccurrence(ev.event_time, ev.recurrence_until, now);
+    if (!occurrence) continue; // no quedan ocurrencias futuras (ni siquiera hoy)
 
-    if (!ev.reminder_24h_sent && msUntil <= 24 * HOUR_MS) {
-      await sendSafely(bot, ev.telegram_id, buildAdvanceMessage(ev));
-      db.markReminderSent(ev.id, 'reminder_24h_sent');
+    const occIso = occurrence.toISOString();
+    const msUntil = occurrence.getTime() - now.getTime();
+    if (msUntil <= 0) continue;
+
+    if (ev.reminder_24h_sent_for !== occIso && msUntil <= 24 * HOUR_MS) {
+      await sendSafely(bot, ev.telegram_id, buildAdvanceMessage(ev, occurrence));
+      await db.markReminderSent(ev.id, 'reminder_24h_sent_for', occIso);
     }
 
-    if (!ev.reminder_departure_sent) {
+    if (ev.reminder_departure_sent_for !== occIso) {
       const leadMs = await resolveDepartureLeadMs(ev);
       if (msUntil <= leadMs) {
-        await sendSafely(bot, ev.telegram_id, buildDepartureMessage(ev));
-        db.markReminderSent(ev.id, 'reminder_departure_sent');
+        await sendSafely(bot, ev.telegram_id, buildDepartureMessage(ev, occurrence));
+        await db.markReminderSent(ev.id, 'reminder_departure_sent_for', occIso);
       }
     }
   }
@@ -47,7 +51,7 @@ async function resolveDepartureLeadMs(ev) {
     return (ev.route_duration_min + DEPARTURE_BUFFER_MIN) * MIN_MS;
   }
 
-  const user = db.getUser(ev.telegram_id);
+  const user = await db.getUser(ev.telegram_id);
   if (!user?.home_lat || !user?.home_lon) {
     // Sin "casa" configurada no podemos calcular el trayecto: usa el aviso fijo.
     return NO_LOCATION_LEAD_MIN * MIN_MS;
@@ -59,21 +63,21 @@ async function resolveDepartureLeadMs(ev) {
   );
   if (!route) return NO_LOCATION_LEAD_MIN * MIN_MS;
 
-  db.saveRoute(ev.id, route.distanceKm, route.durationMin);
+  await db.saveRoute(ev.id, route.distanceKm, route.durationMin);
   ev.route_distance_km = route.distanceKm;
   ev.route_duration_min = route.durationMin;
   return (route.durationMin + DEPARTURE_BUFFER_MIN) * MIN_MS;
 }
 
-function buildAdvanceMessage(ev) {
-  const when = formatDateTime(new Date(ev.event_time));
+function buildAdvanceMessage(ev, occurrence) {
+  const when = formatDateTime(occurrence);
   let msg = `📅 Recordatorio: *${ev.title}* es mañana a las ${when}.`;
   if (ev.location_text) msg += `\n📍 ${ev.location_text}`;
   return msg;
 }
 
-function buildDepartureMessage(ev) {
-  const when = formatDateTime(new Date(ev.event_time));
+function buildDepartureMessage(ev, occurrence) {
+  const when = formatDateTime(occurrence);
   let msg = `🔔 *${ev.title}* empieza a las ${when}.`;
   if (ev.route_distance_km != null) {
     msg += `\n🚗 Salida recomendada ya: ${ev.route_distance_km.toFixed(1)} km, ~${Math.round(ev.route_duration_min)} min hasta el lugar.`;
