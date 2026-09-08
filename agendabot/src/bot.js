@@ -18,7 +18,7 @@ if (!BOT_TOKEN) {
 const bot = new Telegraf(BOT_TOKEN);
 
 // ---------------------------------------------------------------------------
-// Asistente guiado para crear una cita: /nueva
+// Asistente guiado para crear una cita puntual: /nueva
 // ---------------------------------------------------------------------------
 const nuevaEventoScene = new Scenes.WizardScene(
   'nueva-evento',
@@ -94,7 +94,7 @@ const nuevaEventoScene = new Scenes.WizardScene(
 
 nuevaEventoScene.action('nueva_confirmar', async (ctx) => {
   const ev = ctx.wizard.state.event;
-  const id = db.createEvent(ctx.from.id, ev);
+  const id = await db.createEvent(ctx.from.id, ev);
   await ctx.answerCbQuery();
   await ctx.editMessageReplyMarkup();
   await ctx.reply(`✅ Guardado con el nº ${id}. Te avisaré antes de la cita.`);
@@ -108,7 +108,117 @@ nuevaEventoScene.action('nueva_cancelar', async (ctx) => {
   return ctx.scene.leave();
 });
 
-const stage = new Scenes.Stage([nuevaEventoScene]);
+// ---------------------------------------------------------------------------
+// Asistente guiado para crear una clase que se repite cada semana: /nuevaclase
+// ---------------------------------------------------------------------------
+const nuevaClaseScene = new Scenes.WizardScene(
+  'nueva-clase',
+  async (ctx) => {
+    ctx.wizard.state.event = {};
+    await ctx.reply('¿Cómo se llama la asignatura o clase? (ej. "Construcció III")');
+    return ctx.wizard.next();
+  },
+  async (ctx) => {
+    if (!ctx.message?.text) {
+      await ctx.reply('Escríbeme el título en texto, por favor.');
+      return;
+    }
+    ctx.wizard.state.event.title = ctx.message.text.trim();
+    await ctx.reply(
+      '¿Qué día de la semana y a qué hora es la próxima sesión? (ej. "martes 17:00")\n' +
+        'Repetiré la clase cada semana a ese mismo día y hora.',
+    );
+    return ctx.wizard.next();
+  },
+  async (ctx) => {
+    const text = ctx.message?.text;
+    if (!text) {
+      await ctx.reply('Dime el día y la hora en texto, ej. "martes 17:00".');
+      return;
+    }
+    const parsed = chrono.es.parseDate(text, new Date(), { forwardDate: true });
+    if (!parsed) {
+      await ctx.reply('No lo he entendido. Prueba de nuevo, ej. "martes 17:00" o "jueves a las 15:00".');
+      return;
+    }
+    ctx.wizard.state.event.eventTime = parsed;
+    await ctx.reply(
+      `Primera sesión: ${parsed.toLocaleString('es-ES')}.\n¿Dónde es? Escribe la dirección o el lugar, o "-" si no hay ubicación.`,
+    );
+    return ctx.wizard.next();
+  },
+  async (ctx) => {
+    const text = ctx.message?.text?.trim();
+    if (!text) {
+      await ctx.reply('Escríbeme la ubicación o "-" para omitirla.');
+      return;
+    }
+    const ev = ctx.wizard.state.event;
+
+    if (text !== '-') {
+      await ctx.reply('Buscando esa ubicación...');
+      const geo = await geocodeAddress(text);
+      if (!geo) {
+        await ctx.reply('No he encontrado esa dirección. Prueba a escribirla de otra forma, o envía "-" para omitirla.');
+        return;
+      }
+      ev.locationText = geo.displayName;
+      ev.lat = geo.lat;
+      ev.lon = geo.lon;
+    }
+
+    await ctx.reply('¿Hasta qué fecha se repite? (ej. "30/01/2027" o "fin de enero")');
+    return ctx.wizard.next();
+  },
+  async (ctx) => {
+    const text = ctx.message?.text;
+    if (!text) {
+      await ctx.reply('Dime hasta qué fecha se repite, ej. "30/01/2027".');
+      return;
+    }
+    const parsed = chrono.es.parseDate(text, new Date(), { forwardDate: true });
+    if (!parsed) {
+      await ctx.reply('No he entendido la fecha. Prueba de nuevo, ej. "30/01/2027".');
+      return;
+    }
+    const ev = ctx.wizard.state.event;
+    ev.recurrenceUntil = parsed;
+
+    const resumen =
+      `📅 *${ev.title}* 🔁 (cada semana)\n🕒 Primera sesión: ${ev.eventTime.toLocaleString('es-ES')}\n` +
+      `🔁 Hasta: ${parsed.toLocaleDateString('es-ES')}` +
+      (ev.locationText ? `\n📍 ${ev.locationText}` : '');
+    await ctx.reply(`${resumen}\n\n¿Confirmo?`, {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard([
+        Markup.button.callback('✅ Guardar', 'clase_confirmar'),
+        Markup.button.callback('❌ Cancelar', 'clase_cancelar'),
+      ]),
+    });
+    return ctx.wizard.next();
+  },
+  async (ctx) => {
+    await ctx.reply('Usa los botones de arriba para confirmar o cancelar 🙂');
+  },
+);
+
+nuevaClaseScene.action('clase_confirmar', async (ctx) => {
+  const ev = ctx.wizard.state.event;
+  const id = await db.createEvent(ctx.from.id, ev);
+  await ctx.answerCbQuery();
+  await ctx.editMessageReplyMarkup();
+  await ctx.reply(`✅ Clase guardada con el nº ${id}. Te avisaré cada semana antes de cada sesión.`);
+  return ctx.scene.leave();
+});
+
+nuevaClaseScene.action('clase_cancelar', async (ctx) => {
+  await ctx.answerCbQuery();
+  await ctx.editMessageReplyMarkup();
+  await ctx.reply('Clase cancelada.');
+  return ctx.scene.leave();
+});
+
+const stage = new Scenes.Stage([nuevaEventoScene, nuevaClaseScene]);
 bot.use(session());
 bot.use(stage.middleware());
 
@@ -118,24 +228,26 @@ bot.use(stage.middleware());
 const WELCOME_TEXT =
   '¡Hola! Soy tu agenda personal 🗓️\n\n' +
   'Comandos:\n' +
-  '/nueva – añadir una cita paso a paso\n' +
-  '/agenda – ver tus próximas citas\n' +
-  '/hoy – ver las citas de hoy\n' +
-  '/eliminar <nº> – borrar una cita\n' +
+  '/nueva – añadir una cita puntual, paso a paso\n' +
+  '/nuevaclase – añadir una clase que se repite cada semana (horario de universidad)\n' +
+  '/agenda – ver tus próximas citas y clases\n' +
+  '/hoy – ver lo que tienes hoy\n' +
+  '/eliminar <nº> – borrar una cita o clase\n' +
   '/casa <dirección> – fija tu ubicación de partida (para calcular tiempo y distancia)\n' +
   '/ayuda – mostrar esta ayuda\n\n' +
-  'También puedes escribirme directamente, ej.:\n' +
+  'También puedes escribirme directamente una cita puntual, ej.:\n' +
   '"Dentista mañana a las 10 en Manacor"';
 
 bot.start((ctx) => ctx.reply(WELCOME_TEXT));
 bot.command('ayuda', (ctx) => ctx.reply(WELCOME_TEXT));
 
 bot.command('nueva', (ctx) => ctx.scene.enter('nueva-evento'));
+bot.command('nuevaclase', (ctx) => ctx.scene.enter('nueva-clase'));
 
 bot.command('casa', async (ctx) => {
   const address = ctx.message.text.replace(/^\/casa(@\w+)?\s*/i, '').trim();
   if (!address) {
-    const user = db.getUser(ctx.from.id);
+    const user = await db.getUser(ctx.from.id);
     if (user?.home_address) {
       await ctx.reply(`Tu ubicación actual es: 📍 ${user.home_address}`);
     } else {
@@ -149,14 +261,14 @@ bot.command('casa', async (ctx) => {
     await ctx.reply('No he encontrado esa dirección, prueba con otra redacción.');
     return;
   }
-  db.setHome(ctx.from.id, geo.displayName, geo.lat, geo.lon);
+  await db.setHome(ctx.from.id, geo.displayName, geo.lat, geo.lon);
   await ctx.reply(`📍 Ubicación guardada: ${geo.displayName}\nA partir de ahora calcularé el tiempo y la distancia hasta cada cita desde aquí.`);
 });
 
 bot.command('agenda', async (ctx) => {
-  const events = db.listUpcomingEvents(ctx.from.id, 20);
+  const events = await db.listUpcomingEvents(ctx.from.id, 20);
   if (!events.length) {
-    await ctx.reply('No tienes citas próximas. Usa /nueva para añadir una.');
+    await ctx.reply('No tienes citas próximas. Usa /nueva o /nuevaclase para añadir una.');
     return;
   }
   const text = events.map(formatEventLine).join('\n\n');
@@ -167,7 +279,7 @@ bot.command('hoy', async (ctx) => {
   const now = new Date();
   const endOfDay = new Date(now);
   endOfDay.setHours(23, 59, 59, 999);
-  const events = db.listEventsBetween(ctx.from.id, now, endOfDay);
+  const events = await db.listEventsBetween(ctx.from.id, now, endOfDay);
   if (!events.length) {
     await ctx.reply('No tienes más citas hoy.');
     return;
@@ -182,16 +294,16 @@ bot.command('eliminar', async (ctx) => {
     await ctx.reply('Indica el número de la cita, ej. /eliminar 3 (usa /agenda para ver los números).');
     return;
   }
-  const ok = db.deleteEvent(ctx.from.id, id);
+  const ok = await db.deleteEvent(ctx.from.id, id);
   await ctx.reply(ok ? `🗑️ Cita #${id} eliminada.` : `No he encontrado la cita #${id}.`);
 });
 
 // ---------------------------------------------------------------------------
-// Alta rápida en lenguaje natural (fuera del asistente /nueva)
-// Ej.: "Dentista mañana a las 10 en Manacor"
+// Alta rápida en lenguaje natural (fuera de los asistentes /nueva y /nuevaclase)
+// Solo para citas puntuales. Ej.: "Dentista mañana a las 10 en Manacor"
 // ---------------------------------------------------------------------------
-// Nota: mientras el asistente /nueva está activo, Telegraf enruta los
-// mensajes a los pasos del wizard y este handler global no llega a ejecutarse.
+// Nota: mientras un asistente está activo, Telegraf enruta los mensajes a
+// sus pasos y este handler global no llega a ejecutarse.
 bot.on('text', async (ctx) => {
   const text = ctx.message.text.trim();
   if (text.startsWith('/')) return;
@@ -199,7 +311,7 @@ bot.on('text', async (ctx) => {
   const results = chrono.es.parse(text, new Date(), { forwardDate: true });
   if (!results.length) {
     await ctx.reply(
-      'No te he entendido. Prueba con /nueva para el asistente guiado, o escribe algo como\n"Dentista mañana a las 10 en Manacor".',
+      'No te he entendido. Prueba con /nueva (cita puntual) o /nuevaclase (clase semanal), o escribe algo como\n"Dentista mañana a las 10 en Manacor".',
     );
     return;
   }
@@ -253,7 +365,7 @@ bot.action('quick_confirmar', async (ctx) => {
     await ctx.reply('Esa propuesta ya ha caducado, vuelve a escribirla.');
     return;
   }
-  const id = db.createEvent(ctx.from.id, ev);
+  const id = await db.createEvent(ctx.from.id, ev);
   ctx.session.pendingQuickEvent = null;
   await ctx.reply(`✅ Guardado con el nº ${id}. Te avisaré antes de la cita.`);
 });
